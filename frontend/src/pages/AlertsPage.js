@@ -21,7 +21,7 @@ import {
   Snackbar,
   Chip
 } from '@mui/material';
-import { Add, Delete, Edit, Email } from '@mui/icons-material';
+import { Add, Delete, Email } from '@mui/icons-material';
 import { alertService } from '../services/api';
 
 const AlertsPage = () => {
