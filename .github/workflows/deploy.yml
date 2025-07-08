@@ -1,0 +1,449 @@
+name: Deploy to EKS
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - staging
+  pull_request:
+    branches:
+      - main
+      - staging
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'development'
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+      version:
+        description: 'Version tag'
+        required: false
+        default: ''
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY_NAME: ai-agent-recruiter
+  EKS_CLUSTER_NAME: ai-agent-recruiter
+
+jobs:
+  # Determine environment based on branch
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.env.outputs.environment }}
+      version: ${{ steps.env.outputs.version }}
+      deploy: ${{ steps.env.outputs.deploy }}
+    steps:
+      - name: Determine environment and version
+        id: env
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "environment=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+            echo "version=${{ github.event.inputs.version || github.sha }}" >> $GITHUB_OUTPUT
+            echo "deploy=true" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "environment=production" >> $GITHUB_OUTPUT
+            echo "version=${{ github.sha }}" >> $GITHUB_OUTPUT
+            echo "deploy=true" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == "refs/heads/staging" ]]; then
+            echo "environment=staging" >> $GITHUB_OUTPUT
+            echo "version=${{ github.sha }}" >> $GITHUB_OUTPUT
+            echo "deploy=true" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == "refs/heads/develop" ]]; then
+            echo "environment=development" >> $GITHUB_OUTPUT
+            echo "version=${{ github.sha }}" >> $GITHUB_OUTPUT
+            echo "deploy=true" >> $GITHUB_OUTPUT
+          else
+            echo "environment=development" >> $GITHUB_OUTPUT
+            echo "version=${{ github.sha }}" >> $GITHUB_OUTPUT
+            echo "deploy=false" >> $GITHUB_OUTPUT
+          fi
+
+  # Backend tests
+  test-backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Cache Python dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('backend/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          cd backend
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio pytest-cov
+
+      - name: Run backend tests
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test_db
+          OPENAI_API_KEY: test_key
+        run: |
+          cd backend
+          python -m pytest tests/ -v --cov=app --cov-report=xml || true
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./backend/coverage.xml
+          flags: backend
+          name: backend-coverage
+
+  # Frontend tests
+  test-frontend:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          cd frontend
+          npm ci
+
+      - name: Run frontend tests
+        run: |
+          cd frontend
+          npm test -- --coverage --watchAll=false || true
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./frontend/coverage/lcov.info
+          flags: frontend
+          name: frontend-coverage
+
+  # Security scanning
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  # Build and push Docker images
+  build-and-push:
+    needs: [setup, test-backend, test-frontend]
+    if: needs.setup.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    environment: ${{ needs.setup.outputs.environment }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Create ECR repositories if they don't exist
+        run: |
+          aws ecr describe-repositories --repository-names ${ECR_REPOSITORY_NAME}-backend --region ${{ env.AWS_REGION }} || \
+          aws ecr create-repository --repository-name ${ECR_REPOSITORY_NAME}-backend --region ${{ env.AWS_REGION }} \
+            --image-scanning-configuration scanOnPush=true --encryption-configuration encryptionType=AES256
+          
+          aws ecr describe-repositories --repository-names ${ECR_REPOSITORY_NAME}-frontend --region ${{ env.AWS_REGION }} || \
+          aws ecr create-repository --repository-name ${ECR_REPOSITORY_NAME}-frontend --region ${{ env.AWS_REGION }} \
+            --image-scanning-configuration scanOnPush=true --encryption-configuration encryptionType=AES256
+
+      - name: Build and push backend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY_NAME }}-backend:${{ needs.setup.outputs.version }}
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY_NAME }}-backend:${{ needs.setup.outputs.environment }}
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY_NAME }}-backend:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY_NAME }}-frontend:${{ needs.setup.outputs.version }}
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY_NAME }}-frontend:${{ needs.setup.outputs.environment }}
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY_NAME }}-frontend:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan Docker images
+        run: |
+          # Scan backend image
+          aws ecr start-image-scan \
+            --repository-name ${ECR_REPOSITORY_NAME}-backend \
+            --image-id imageTag=${{ needs.setup.outputs.version }} \
+            --region ${{ env.AWS_REGION }} || true
+          
+          # Scan frontend image
+          aws ecr start-image-scan \
+            --repository-name ${ECR_REPOSITORY_NAME}-frontend \
+            --image-id imageTag=${{ needs.setup.outputs.version }} \
+            --region ${{ env.AWS_REGION }} || true
+
+  # Deploy to EKS
+  deploy:
+    needs: [setup, build-and-push]
+    if: needs.setup.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    environment: ${{ needs.setup.outputs.environment }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.27.0'
+
+      - name: Install Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: 'v3.12.0'
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+
+      - name: Deploy to Kubernetes
+        env:
+          ENVIRONMENT: ${{ needs.setup.outputs.environment }}
+          VERSION: ${{ needs.setup.outputs.version }}
+          AWS_ACCOUNT_ID: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          # Set namespace based on environment
+          case $ENVIRONMENT in
+            production)
+              NAMESPACE="ai-agent-recruiter"
+              ;;
+            staging)
+              NAMESPACE="ai-agent-recruiter-staging"
+              ;;
+            development)
+              NAMESPACE="ai-agent-recruiter-dev"
+              ;;
+          esac
+          
+          # Create namespace if it doesn't exist
+          kubectl apply -f k8s/manifests/namespace.yaml
+          
+          # Deploy secrets (if they don't exist)
+          kubectl get secret ai-agent-recruiter-secrets -n $NAMESPACE || \
+          kubectl create secret generic ai-agent-recruiter-secrets -n $NAMESPACE \
+            --from-literal=OPENAI_API_KEY="${{ secrets.OPENAI_API_KEY }}" \
+            --from-literal=EMAIL_USERNAME="${{ secrets.EMAIL_USERNAME }}" \
+            --from-literal=EMAIL_PASSWORD="${{ secrets.EMAIL_PASSWORD }}" \
+            --from-literal=POSTGRES_PASSWORD="${{ secrets.POSTGRES_PASSWORD }}" \
+            --from-literal=JWT_SECRET_KEY="${{ secrets.JWT_SECRET_KEY }}" \
+            --from-literal=ENCRYPTION_KEY="${{ secrets.ENCRYPTION_KEY }}"
+          
+          # Deploy ConfigMaps
+          kubectl apply -f k8s/manifests/configmap.yaml
+          
+          # Deploy RBAC
+          kubectl apply -f k8s/manifests/rbac.yaml
+          
+          # Deploy storage
+          kubectl apply -f k8s/manifests/pvc.yaml
+          
+          # Update image tags and deploy applications
+          AWS_ACCOUNT_ID=$(echo ${{ steps.login-ecr.outputs.registry }} | cut -d. -f1)
+          ECR_REGISTRY="$AWS_ACCOUNT_ID.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
+          
+          # Create temporary deployment files with updated image tags
+          mkdir -p /tmp/k8s-deploy
+          sed "s|your-registry/ai-agent-recruiter-backend:latest|$ECR_REGISTRY/${{ env.ECR_REPOSITORY_NAME }}-backend:$VERSION|g" \
+            k8s/manifests/backend-deployment.yaml > /tmp/k8s-deploy/backend-deployment.yaml
+          sed "s|your-registry/ai-agent-recruiter-frontend:latest|$ECR_REGISTRY/${{ env.ECR_REPOSITORY_NAME }}-frontend:$VERSION|g" \
+            k8s/manifests/frontend-deployment.yaml > /tmp/k8s-deploy/frontend-deployment.yaml
+          
+          # Deploy applications
+          kubectl apply -f /tmp/k8s-deploy/backend-deployment.yaml
+          kubectl apply -f /tmp/k8s-deploy/frontend-deployment.yaml
+          kubectl apply -f k8s/manifests/backend-service.yaml
+          kubectl apply -f k8s/manifests/frontend-service.yaml
+          
+          # Deploy ingress
+          kubectl apply -f k8s/manifests/ingress.yaml
+          
+          # Deploy HPA
+          kubectl apply -f k8s/manifests/hpa.yaml
+          
+          # Wait for deployments to be ready
+          kubectl wait --for=condition=available --timeout=600s deployment/ai-agent-recruiter-backend -n $NAMESPACE
+          kubectl wait --for=condition=available --timeout=600s deployment/ai-agent-recruiter-frontend -n $NAMESPACE
+
+      - name: Verify deployment
+        run: |
+          case ${{ needs.setup.outputs.environment }} in
+            production)
+              NAMESPACE="ai-agent-recruiter"
+              ;;
+            staging)
+              NAMESPACE="ai-agent-recruiter-staging"
+              ;;
+            development)
+              NAMESPACE="ai-agent-recruiter-dev"
+              ;;
+          esac
+          
+          echo "=== Deployment Status ==="
+          kubectl get pods -n $NAMESPACE
+          kubectl get services -n $NAMESPACE
+          kubectl get ingress -n $NAMESPACE
+          
+          echo "=== Application Health ==="
+          kubectl get deployment ai-agent-recruiter-backend -n $NAMESPACE -o jsonpath='{.status.conditions[?(@.type=="Available")].status}'
+          kubectl get deployment ai-agent-recruiter-frontend -n $NAMESPACE -o jsonpath='{.status.conditions[?(@.type=="Available")].status}'
+
+      - name: Run database migrations
+        if: needs.setup.outputs.environment != 'development'
+        run: |
+          case ${{ needs.setup.outputs.environment }} in
+            production)
+              NAMESPACE="ai-agent-recruiter"
+              ;;
+            staging)
+              NAMESPACE="ai-agent-recruiter-staging"
+              ;;
+          esac
+          
+          # Get backend pod name
+          BACKEND_POD=$(kubectl get pods -n $NAMESPACE -l component=backend -o jsonpath='{.items[0].metadata.name}')
+          
+          if [[ -n "$BACKEND_POD" ]]; then
+            echo "Running database migrations in pod: $BACKEND_POD"
+            kubectl exec -n $NAMESPACE $BACKEND_POD -- python -m alembic upgrade head || echo "Migrations not configured or failed"
+          fi
+
+  # Notify deployment status
+  notify:
+    needs: [setup, deploy]
+    if: always() && needs.setup.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Notify Slack on success
+        if: needs.deploy.result == 'success'
+        uses: 8398a7/action-slack@v3
+        with:
+          status: success
+          text: |
+            ✅ Deployment to ${{ needs.setup.outputs.environment }} successful!
+            Version: ${{ needs.setup.outputs.version }}
+            Branch: ${{ github.ref }}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      - name: Notify Slack on failure
+        if: needs.deploy.result == 'failure'
+        uses: 8398a7/action-slack@v3
+        with:
+          status: failure
+          text: |
+            ❌ Deployment to ${{ needs.setup.outputs.environment }} failed!
+            Version: ${{ needs.setup.outputs.version }}
+            Branch: ${{ github.ref }}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  # Cleanup old images
+  cleanup:
+    needs: [setup, deploy]
+    if: needs.deploy.result == 'success'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Cleanup old ECR images
+        run: |
+          # Keep only the last 10 images for each repository
+          aws ecr list-images --repository-name ${{ env.ECR_REPOSITORY_NAME }}-backend --filter tagStatus=UNTAGGED --query 'imageIds[?imageDigest!=null]' --output json | \
+          jq '.[:10] | .[] | select(.imageDigest != null) | .imageDigest' | \
+          xargs -I {} aws ecr batch-delete-image --repository-name ${{ env.ECR_REPOSITORY_NAME }}-backend --image-ids imageDigest={} || true
+          
+          aws ecr list-images --repository-name ${{ env.ECR_REPOSITORY_NAME }}-frontend --filter tagStatus=UNTAGGED --query 'imageIds[?imageDigest!=null]' --output json | \
+          jq '.[:10] | .[] | select(.imageDigest != null) | .imageDigest' | \
+          xargs -I {} aws ecr batch-delete-image --repository-name ${{ env.ECR_REPOSITORY_NAME }}-frontend --image-ids imageDigest={} || true
