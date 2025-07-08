@@ -170,9 +170,126 @@ jobs:
         with:
           sarif_file: 'trivy-results.sarif'
 
+  # Infrastructure provisioning
+  infrastructure:
+    needs: [setup]
+    if: needs.setup.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    environment: ${{ needs.setup.outputs.environment }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            curl \
+            wget \
+            ca-certificates \
+            gnupg \
+            lsb-release \
+            unzip
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.6.0"
+          terraform_wrapper: false
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.27.0'
+
+      - name: Install Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: 'v3.12.0'
+
+      - name: Setup Terraform backend
+        env:
+          ENVIRONMENT: ${{ needs.setup.outputs.environment }}
+        run: |
+          cd k8s/scripts
+          ./setup-terraform-backend.sh --environment "$ENVIRONMENT" --region "$AWS_REGION"
+
+      - name: Initialize Terraform
+        working-directory: k8s/terraform
+        run: |
+          terraform init -reconfigure
+
+      - name: Validate Terraform configuration
+        working-directory: k8s/terraform
+        run: |
+          terraform validate
+
+      - name: Plan Terraform deployment
+        working-directory: k8s/terraform
+        env:
+          ENVIRONMENT: ${{ needs.setup.outputs.environment }}
+          TF_VAR_rds_password: ${{ secrets.RDS_PASSWORD }}
+          TF_VAR_openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+          TF_VAR_email_username: ${{ secrets.EMAIL_USERNAME }}
+          TF_VAR_email_password: ${{ secrets.EMAIL_PASSWORD }}
+          TF_VAR_jwt_secret_key: ${{ secrets.JWT_SECRET_KEY }}
+          TF_VAR_encryption_key: ${{ secrets.ENCRYPTION_KEY }}
+        run: |
+          terraform plan \
+            -var-file="environments/${ENVIRONMENT}.tfvars" \
+            -out=tfplan
+
+      - name: Apply Terraform deployment
+        working-directory: k8s/terraform
+        env:
+          ENVIRONMENT: ${{ needs.setup.outputs.environment }}
+          TF_VAR_rds_password: ${{ secrets.RDS_PASSWORD }}
+          TF_VAR_openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+          TF_VAR_email_username: ${{ secrets.EMAIL_USERNAME }}
+          TF_VAR_email_password: ${{ secrets.EMAIL_PASSWORD }}
+          TF_VAR_jwt_secret_key: ${{ secrets.JWT_SECRET_KEY }}
+          TF_VAR_encryption_key: ${{ secrets.ENCRYPTION_KEY }}
+        run: |
+          terraform apply -auto-approve tfplan
+
+      - name: Update EKS cluster name
+        working-directory: k8s/terraform
+        run: |
+          # Get the actual cluster name from Terraform output
+          CLUSTER_NAME=$(terraform output -raw cluster_id)
+          echo "CLUSTER_NAME=$CLUSTER_NAME" >> $GITHUB_ENV
+
+      - name: Verify cluster is ready
+        run: |
+          # Update kubeconfig
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name $CLUSTER_NAME
+          
+          # Wait for cluster to be ready
+          echo "Waiting for cluster to be ready..."
+          kubectl get nodes || echo "Cluster not ready yet"
+          
+          # Wait for nodes to be ready
+          timeout 600 bash -c '
+            while ! kubectl get nodes --no-headers | grep -q "Ready"; do
+              echo "Waiting for nodes to be ready..."
+              sleep 30
+            done
+          '
+          
+          echo "Cluster is ready!"
+          kubectl get nodes
+
   # Build and push Docker images
   build-and-push:
-    needs: [setup, test-backend, test-frontend]
+    needs: [setup, test-backend, test-frontend, infrastructure]
     if: needs.setup.outputs.deploy == 'true'
     runs-on: ubuntu-latest
     environment: ${{ needs.setup.outputs.environment }}
@@ -297,7 +414,7 @@ jobs:
 
   # Deploy to EKS
   deploy:
-    needs: [setup, build-and-push]
+    needs: [setup, build-and-push, infrastructure]
     if: needs.setup.outputs.deploy == 'true'
     runs-on: ubuntu-latest
     environment: ${{ needs.setup.outputs.environment }}
@@ -340,9 +457,19 @@ jobs:
         with:
           version: 'v3.12.0'
 
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.6.0"
+          terraform_wrapper: false
+
       - name: Update kubeconfig
         run: |
-          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+          # Get cluster name from Terraform output
+          cd k8s/terraform
+          CLUSTER_NAME=$(terraform output -raw cluster_id)
+          echo "Using cluster: $CLUSTER_NAME"
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name $CLUSTER_NAME
 
       - name: Deploy to Kubernetes
         env:
@@ -439,7 +566,7 @@ jobs:
 
   # Notify deployment status
   notify:
-    needs: [setup, deploy]
+    needs: [setup, deploy, infrastructure]
     if: always() && needs.setup.outputs.deploy == 'true'
     runs-on: ubuntu-latest
     

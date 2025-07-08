@@ -14,15 +14,9 @@ terraform {
       version = "~> 2.10"
     }
   }
-
-  backend "s3" {
-    bucket = "ai-agent-recruiter-terraform-state"
-    key    = "terraform.tfstate"
-    region = "us-east-1"
-    
-    dynamodb_table = "ai-agent-recruiter-terraform-locks"
-    encrypt        = true
-  }
+  
+  # Backend configuration is now in backend.tf
+  # This allows for environment-specific backend configurations
 }
 
 provider "aws" {
