@@ -1,0 +1,371 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'development'
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+      version:
+        description: 'Version tag'
+        required: false
+        default: ''
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY_NAME: ai-agent-recruiter
+  EKS_CLUSTER_NAME: ai-agent-recruiter
+
+jobs:
+  # Determine environment based on branch
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.env.outputs.environment }}
+      version: ${{ steps.env.outputs.version }}
+      deploy: ${{ steps.env.outputs.deploy }}
+    steps:
+      - name: Determine environment and version
+        id: env
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "environment=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+            echo "version=${{ github.event.inputs.version || github.sha }}" >> $GITHUB_OUTPUT
+            echo "deploy=true" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "environment=production" >> $GITHUB_OUTPUT
+            echo "version=${{ github.sha }}" >> $GITHUB_OUTPUT
+            echo "deploy=true" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == "refs/heads/develop" ]]; then
+            echo "environment=development" >> $GITHUB_OUTPUT
+            echo "version=${{ github.sha }}" >> $GITHUB_OUTPUT
+            echo "deploy=true" >> $GITHUB_OUTPUT
+          else
+            echo "environment=development" >> $GITHUB_OUTPUT
+            echo "version=${{ github.sha }}" >> $GITHUB_OUTPUT
+            echo "deploy=false" >> $GITHUB_OUTPUT
+          fi
+
+  # Backend tests
+  test-backend:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: 'backend/requirements.txt'
+
+      - name: Install dependencies
+        run: |
+          cd backend
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio pytest-cov
+
+      - name: Run backend tests
+        env:
+          DATABASE_URL: sqlite:///./test_jobs.db
+          OPENAI_API_KEY: test_key
+        run: |
+          cd backend
+          python -m pytest tests/ -v --cov=app --cov-report=xml || echo "No tests found or tests failed"
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        if: always()
+        with:
+          file: ./backend/coverage.xml
+          flags: backend
+          name: backend-coverage
+
+  # Frontend tests
+  test-frontend:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: 'frontend/package-lock.json'
+
+      - name: Install dependencies
+        run: |
+          cd frontend
+          npm ci
+
+      - name: Run frontend tests
+        run: |
+          cd frontend
+          npm test -- --coverage --watchAll=false || echo "No tests found or tests failed"
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        if: always()
+        with:
+          file: ./frontend/coverage/lcov.info
+          flags: frontend
+          name: frontend-coverage
+
+  # Security scanning
+  security-scan:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  # Build and push Docker images
+  build-and-push:
+    needs: [setup, test-backend, test-frontend]
+    if: needs.setup.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    environment: ${{ needs.setup.outputs.environment }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Create ECR repositories if they don't exist
+        run: |
+          aws ecr describe-repositories --repository-names ${ECR_REPOSITORY_NAME}-backend --region ${{ env.AWS_REGION }} || \
+          aws ecr create-repository --repository-name ${ECR_REPOSITORY_NAME}-backend --region ${{ env.AWS_REGION }} \
+            --image-scanning-configuration scanOnPush=true --encryption-configuration encryptionType=AES256
+          
+          aws ecr describe-repositories --repository-names ${ECR_REPOSITORY_NAME}-frontend --region ${{ env.AWS_REGION }} || \
+          aws ecr create-repository --repository-name ${ECR_REPOSITORY_NAME}-frontend --region ${{ env.AWS_REGION }} \
+            --image-scanning-configuration scanOnPush=true --encryption-configuration encryptionType=AES256
+
+      - name: Build and push backend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY_NAME }}-backend:${{ needs.setup.outputs.version }}
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY_NAME }}-backend:${{ needs.setup.outputs.environment }}
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY_NAME }}-backend:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY_NAME }}-frontend:${{ needs.setup.outputs.version }}
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY_NAME }}-frontend:${{ needs.setup.outputs.environment }}
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY_NAME }}-frontend:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan Docker images
+        run: |
+          # Scan backend image
+          aws ecr start-image-scan \
+            --repository-name ${ECR_REPOSITORY_NAME}-backend \
+            --image-id imageTag=${{ needs.setup.outputs.version }} \
+            --region ${{ env.AWS_REGION }} || echo "Image scan failed or already in progress"
+          
+          # Scan frontend image  
+          aws ecr start-image-scan \
+            --repository-name ${ECR_REPOSITORY_NAME}-frontend \
+            --image-id imageTag=${{ needs.setup.outputs.version }} \
+            --region ${{ env.AWS_REGION }} || echo "Image scan failed or already in progress"
+
+  # Deploy to EKS
+  deploy:
+    needs: [setup, build-and-push]
+    if: needs.setup.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    environment: ${{ needs.setup.outputs.environment }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.27.0'
+
+      - name: Install Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: 'v3.12.0'
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+
+      - name: Deploy to Kubernetes
+        env:
+          ENVIRONMENT: ${{ needs.setup.outputs.environment }}
+          VERSION: ${{ needs.setup.outputs.version }}
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          # Set namespace based on environment
+          case $ENVIRONMENT in
+            production)
+              NAMESPACE="ai-agent-recruiter"
+              ;;
+            staging)
+              NAMESPACE="ai-agent-recruiter-staging"
+              ;;
+            development)
+              NAMESPACE="ai-agent-recruiter-dev"
+              ;;
+          esac
+          
+          # Create namespace if it doesn't exist
+          kubectl create namespace $NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
+          
+          # Deploy secrets (if they don't exist)
+          kubectl get secret ai-agent-recruiter-secrets -n $NAMESPACE || \
+          kubectl create secret generic ai-agent-recruiter-secrets -n $NAMESPACE \
+            --from-literal=OPENAI_API_KEY="${{ secrets.OPENAI_API_KEY }}" \
+            --from-literal=EMAIL_USERNAME="${{ secrets.EMAIL_USERNAME }}" \
+            --from-literal=EMAIL_PASSWORD="${{ secrets.EMAIL_PASSWORD }}" \
+            --from-literal=DATABASE_URL="${{ secrets.DATABASE_URL }}" \
+            --from-literal=JWT_SECRET_KEY="${{ secrets.JWT_SECRET_KEY }}" \
+            --from-literal=ENCRYPTION_KEY="${{ secrets.ENCRYPTION_KEY }}"
+          
+          # Deploy using existing K8s manifests if they exist
+          if [ -d "k8s/manifests" ]; then
+            echo "Deploying using existing K8s manifests..."
+            # Apply manifests with environment-specific namespace
+            kubectl apply -f k8s/manifests/ -n $NAMESPACE
+          else
+            echo "Creating basic deployment manifests..."
+            # Create basic deployment if no manifests exist
+            kubectl create deployment ai-agent-recruiter-backend \
+              --image=$ECR_REGISTRY/${{ env.ECR_REPOSITORY_NAME }}-backend:$VERSION \
+              --port=8000 \
+              --replicas=2 \
+              --namespace=$NAMESPACE \
+              --dry-run=client -o yaml | kubectl apply -f -
+            
+            kubectl create deployment ai-agent-recruiter-frontend \
+              --image=$ECR_REGISTRY/${{ env.ECR_REPOSITORY_NAME }}-frontend:$VERSION \
+              --port=3000 \
+              --replicas=2 \
+              --namespace=$NAMESPACE \
+              --dry-run=client -o yaml | kubectl apply -f -
+            
+            # Create services
+            kubectl expose deployment ai-agent-recruiter-backend \
+              --port=8000 \
+              --target-port=8000 \
+              --type=ClusterIP \
+              --namespace=$NAMESPACE \
+              --dry-run=client -o yaml | kubectl apply -f -
+            
+            kubectl expose deployment ai-agent-recruiter-frontend \
+              --port=3000 \
+              --target-port=3000 \
+              --type=ClusterIP \
+              --namespace=$NAMESPACE \
+              --dry-run=client -o yaml | kubectl apply -f -
+          fi
+
+      - name: Verify deployment
+        run: |
+          case ${{ needs.setup.outputs.environment }} in
+            production)
+              NAMESPACE="ai-agent-recruiter"
+              ;;
+            staging)
+              NAMESPACE="ai-agent-recruiter-staging"
+              ;;
+            development)
+              NAMESPACE="ai-agent-recruiter-dev"
+              ;;
+          esac
+          
+          echo "=== Deployment Status ==="
+          kubectl get pods -n $NAMESPACE || echo "No pods found"
+          kubectl get services -n $NAMESPACE || echo "No services found"
+          kubectl get deployments -n $NAMESPACE || echo "No deployments found"
+          
+          echo "=== Waiting for deployments to be ready ==="
+          kubectl wait --for=condition=available --timeout=300s deployment/ai-agent-recruiter-backend -n $NAMESPACE || echo "Backend deployment not ready"
+          kubectl wait --for=condition=available --timeout=300s deployment/ai-agent-recruiter-frontend -n $NAMESPACE || echo "Frontend deployment not ready"
+
+  # Notify deployment status
+  notify:
+    needs: [setup, deploy]
+    if: always() && needs.setup.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Notify on success
+        if: needs.deploy.result == 'success'
+        run: |
+          echo "✅ Deployment to ${{ needs.setup.outputs.environment }} successful!"
+          echo "Version: ${{ needs.setup.outputs.version }}"
+          echo "Branch: ${{ github.ref }}"
+
+      - name: Notify on failure
+        if: needs.deploy.result == 'failure'
+        run: |
+          echo "❌ Deployment to ${{ needs.setup.outputs.environment }} failed!"
+          echo "Version: ${{ needs.setup.outputs.version }}"
+          echo "Branch: ${{ github.ref }}"

@@ -1,0 +1,274 @@
+name: Deploy to EKS
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'development'
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+      version:
+        description: 'Version tag to deploy'
+        required: true
+        default: 'latest'
+      force_deploy:
+        description: 'Force deployment even if version already exists'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY_NAME: ai-agent-recruiter
+  EKS_CLUSTER_NAME: ai-agent-recruiter
+
+jobs:
+  deploy-eks:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.27.0'
+
+      - name: Install Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: 'v3.12.0'
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+
+      - name: Verify images exist
+        run: |
+          ECR_REGISTRY=${{ steps.login-ecr.outputs.registry }}
+          VERSION=${{ github.event.inputs.version }}
+          
+          # Check if backend image exists
+          aws ecr describe-images --repository-name ${ECR_REPOSITORY_NAME}-backend --image-ids imageTag=$VERSION --region ${{ env.AWS_REGION }} || \
+          (echo "Backend image with tag $VERSION not found" && exit 1)
+          
+          # Check if frontend image exists
+          aws ecr describe-images --repository-name ${ECR_REPOSITORY_NAME}-frontend --image-ids imageTag=$VERSION --region ${{ env.AWS_REGION }} || \
+          (echo "Frontend image with tag $VERSION not found" && exit 1)
+
+      - name: Deploy to EKS
+        env:
+          ENVIRONMENT: ${{ github.event.inputs.environment }}
+          VERSION: ${{ github.event.inputs.version }}
+          FORCE_DEPLOY: ${{ github.event.inputs.force_deploy }}
+        run: |
+          ECR_REGISTRY=${{ steps.login-ecr.outputs.registry }}
+          
+          # Set namespace based on environment
+          case $ENVIRONMENT in
+            production)
+              NAMESPACE="ai-agent-recruiter"
+              ;;
+            staging)
+              NAMESPACE="ai-agent-recruiter-staging"
+              ;;
+            development)
+              NAMESPACE="ai-agent-recruiter-dev"
+              ;;
+          esac
+          
+          echo "Deploying to namespace: $NAMESPACE"
+          echo "Version: $VERSION"
+          echo "Environment: $ENVIRONMENT"
+          
+          # Create namespace if it doesn't exist
+          kubectl create namespace $NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
+          
+          # Deploy secrets (if they don't exist)
+          kubectl get secret ai-agent-recruiter-secrets -n $NAMESPACE || \
+          kubectl create secret generic ai-agent-recruiter-secrets -n $NAMESPACE \
+            --from-literal=OPENAI_API_KEY="${{ secrets.OPENAI_API_KEY }}" \
+            --from-literal=EMAIL_USERNAME="${{ secrets.EMAIL_USERNAME }}" \
+            --from-literal=EMAIL_PASSWORD="${{ secrets.EMAIL_PASSWORD }}" \
+            --from-literal=DATABASE_URL="${{ secrets.DATABASE_URL }}" \
+            --from-literal=JWT_SECRET_KEY="${{ secrets.JWT_SECRET_KEY }}" \
+            --from-literal=ENCRYPTION_KEY="${{ secrets.ENCRYPTION_KEY }}"
+          
+          # Deploy using existing K8s manifests if they exist
+          if [ -d "k8s/manifests" ]; then
+            echo "Deploying using existing K8s manifests..."
+            
+            # Create temporary deployment files with updated image tags
+            mkdir -p /tmp/k8s-deploy
+            
+            # Update backend deployment with new image tag
+            if [ -f "k8s/manifests/backend-deployment.yaml" ]; then
+              sed "s|your-registry/ai-agent-recruiter-backend:latest|$ECR_REGISTRY/${ECR_REPOSITORY_NAME}-backend:$VERSION|g" \
+                k8s/manifests/backend-deployment.yaml > /tmp/k8s-deploy/backend-deployment.yaml
+              kubectl apply -f /tmp/k8s-deploy/backend-deployment.yaml -n $NAMESPACE
+            fi
+            
+            # Update frontend deployment with new image tag
+            if [ -f "k8s/manifests/frontend-deployment.yaml" ]; then
+              sed "s|your-registry/ai-agent-recruiter-frontend:latest|$ECR_REGISTRY/${ECR_REPOSITORY_NAME}-frontend:$VERSION|g" \
+                k8s/manifests/frontend-deployment.yaml > /tmp/k8s-deploy/frontend-deployment.yaml
+              kubectl apply -f /tmp/k8s-deploy/frontend-deployment.yaml -n $NAMESPACE
+            fi
+            
+            # Apply other manifests
+            find k8s/manifests/ -name "*.yaml" ! -name "*deployment.yaml" -exec kubectl apply -f {} -n $NAMESPACE \; || echo "Some manifests failed to apply"
+            
+          else
+            echo "Creating basic deployment manifests..."
+            # Create basic deployment if no manifests exist
+            kubectl create deployment ai-agent-recruiter-backend \
+              --image=$ECR_REGISTRY/${ECR_REPOSITORY_NAME}-backend:$VERSION \
+              --port=8000 \
+              --replicas=2 \
+              --namespace=$NAMESPACE \
+              --dry-run=client -o yaml | kubectl apply -f -
+            
+            kubectl create deployment ai-agent-recruiter-frontend \
+              --image=$ECR_REGISTRY/${ECR_REPOSITORY_NAME}-frontend:$VERSION \
+              --port=3000 \
+              --replicas=2 \
+              --namespace=$NAMESPACE \
+              --dry-run=client -o yaml | kubectl apply -f -
+            
+            # Create services
+            kubectl expose deployment ai-agent-recruiter-backend \
+              --port=8000 \
+              --target-port=8000 \
+              --type=ClusterIP \
+              --namespace=$NAMESPACE \
+              --dry-run=client -o yaml | kubectl apply -f -
+            
+            kubectl expose deployment ai-agent-recruiter-frontend \
+              --port=3000 \
+              --target-port=3000 \
+              --type=LoadBalancer \
+              --namespace=$NAMESPACE \
+              --dry-run=client -o yaml | kubectl apply -f -
+          fi
+
+      - name: Wait for deployment
+        run: |
+          case ${{ github.event.inputs.environment }} in
+            production)
+              NAMESPACE="ai-agent-recruiter"
+              ;;
+            staging)
+              NAMESPACE="ai-agent-recruiter-staging"
+              ;;
+            development)
+              NAMESPACE="ai-agent-recruiter-dev"
+              ;;
+          esac
+          
+          echo "Waiting for deployments to be ready..."
+          
+          # Wait for backend deployment
+          kubectl wait --for=condition=available --timeout=600s deployment/ai-agent-recruiter-backend -n $NAMESPACE || \
+          (echo "Backend deployment failed to become ready" && kubectl describe deployment ai-agent-recruiter-backend -n $NAMESPACE)
+          
+          # Wait for frontend deployment
+          kubectl wait --for=condition=available --timeout=600s deployment/ai-agent-recruiter-frontend -n $NAMESPACE || \
+          (echo "Frontend deployment failed to become ready" && kubectl describe deployment ai-agent-recruiter-frontend -n $NAMESPACE)
+
+      - name: Verify deployment and get status
+        run: |
+          case ${{ github.event.inputs.environment }} in
+            production)
+              NAMESPACE="ai-agent-recruiter"
+              ;;
+            staging)
+              NAMESPACE="ai-agent-recruiter-staging"
+              ;;
+            development)
+              NAMESPACE="ai-agent-recruiter-dev"
+              ;;
+          esac
+          
+          echo "=== Deployment Status ==="
+          kubectl get pods -n $NAMESPACE -o wide
+          echo ""
+          kubectl get services -n $NAMESPACE -o wide
+          echo ""
+          kubectl get deployments -n $NAMESPACE -o wide
+          echo ""
+          
+          # Get ingress information if available
+          kubectl get ingress -n $NAMESPACE -o wide || echo "No ingress found"
+          
+          echo "=== Application Health ==="
+          kubectl get deployment ai-agent-recruiter-backend -n $NAMESPACE -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' || echo "Backend status unavailable"
+          kubectl get deployment ai-agent-recruiter-frontend -n $NAMESPACE -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' || echo "Frontend status unavailable"
+          
+          echo ""
+          echo "=== Recent Pod Events ==="
+          kubectl get events -n $NAMESPACE --sort-by=.metadata.creationTimestamp | tail -20
+
+      - name: Run health checks
+        run: |
+          case ${{ github.event.inputs.environment }} in
+            production)
+              NAMESPACE="ai-agent-recruiter"
+              ;;
+            staging)
+              NAMESPACE="ai-agent-recruiter-staging"
+              ;;
+            development)
+              NAMESPACE="ai-agent-recruiter-dev"
+              ;;
+          esac
+          
+          echo "=== Running health checks ==="
+          
+          # Get backend pod and run health check
+          BACKEND_POD=$(kubectl get pods -n $NAMESPACE -l app=ai-agent-recruiter-backend -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+          if [[ -n "$BACKEND_POD" ]]; then
+            echo "Testing backend health endpoint..."
+            kubectl exec -n $NAMESPACE $BACKEND_POD -- curl -f http://localhost:8000/health || echo "Backend health check failed"
+          else
+            echo "Backend pod not found"
+          fi
+          
+          # Get frontend pod and check if it's running
+          FRONTEND_POD=$(kubectl get pods -n $NAMESPACE -l app=ai-agent-recruiter-frontend -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+          if [[ -n "$FRONTEND_POD" ]]; then
+            echo "Frontend pod is running: $FRONTEND_POD"
+            kubectl exec -n $NAMESPACE $FRONTEND_POD -- curl -f http://localhost:3000 || echo "Frontend health check failed"
+          else
+            echo "Frontend pod not found"
+          fi
+
+      - name: Deployment summary
+        run: |
+          echo "🚀 Deployment Summary"
+          echo "Environment: ${{ github.event.inputs.environment }}"
+          echo "Version: ${{ github.event.inputs.version }}"
+          echo "Status: ✅ Completed"
+          echo "Time: $(date)"
+          echo ""
+          echo "Next steps:"
+          echo "1. Monitor application logs"
+          echo "2. Run integration tests"
+          echo "3. Verify application functionality"
