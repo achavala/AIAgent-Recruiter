@@ -197,8 +197,38 @@ For issues and questions:
 - Check the API documentation at `/docs`
 - Review the configuration guide above
 
+## Production Deployment
+
+### Amazon EKS Deployment
+
+The application now includes comprehensive Amazon EKS deployment configuration for production use:
+
+- **Complete Infrastructure as Code** with Terraform
+- **Multi-environment support** (dev, staging, production)
+- **Auto-scaling and high availability**
+- **Security hardening** with RBAC and network policies
+- **Monitoring and logging** with Prometheus and CloudWatch
+- **CI/CD pipeline** with GitHub Actions
+- **Disaster recovery** and backup strategies
+
+For detailed deployment instructions, see the [EKS Deployment Guide](k8s/DEPLOYMENT_GUIDE.md).
+
+#### Quick Start for EKS
+
+```bash
+# Setup EKS cluster
+./k8s/scripts/setup-cluster.sh --environment production --region us-east-1
+
+# Deploy application
+./k8s/scripts/deploy.sh --environment production --version v1.0.0
+```
+
 ## Roadmap
 
+- [x] **Production EKS deployment** with complete infrastructure automation
+- [x] **Security hardening** with RBAC, network policies, and secrets management
+- [x] **Monitoring and observability** with Prometheus, Grafana, and CloudWatch
+- [x] **CI/CD pipeline** with automated testing and deployment
 - [ ] Additional job board integrations
 - [ ] Enhanced AI analysis with job matching
 - [ ] Mobile app development

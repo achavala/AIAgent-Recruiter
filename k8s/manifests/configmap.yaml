@@ -1,0 +1,155 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ai-agent-recruiter-config
+  namespace: ai-agent-recruiter
+  labels:
+    app: ai-agent-recruiter
+    component: config
+data:
+  # Database Configuration
+  DATABASE_URL: "postgresql://postgres:password@postgres-service:5432/aiagent_recruiter"
+  
+  # API Configuration
+  API_HOST: "0.0.0.0"
+  API_PORT: "8000"
+  
+  # Job Scraping Configuration
+  SCRAPING_INTERVAL_HOURS: "1"
+  JOB_RELEVANCE_THRESHOLD: "0.7"
+  
+  # Email Configuration
+  EMAIL_HOST: "smtp.gmail.com"
+  EMAIL_PORT: "587"
+  
+  # Geographic Settings
+  TARGET_COUNTRIES: "USA,United States"
+  
+  # Corp-to-Corp Keywords
+  CORP_TO_CORP_KEYWORDS: "corp to corp,c2c,contract,contractor,consulting,1099,w2,independent contractor"
+  
+  # Frontend Configuration
+  REACT_APP_API_BASE_URL: "https://api.ai-agent-recruiter.com/api"
+  
+  # Logging Configuration
+  LOG_LEVEL: "INFO"
+  LOG_FORMAT: "json"
+  
+  # Health Check Configuration
+  HEALTH_CHECK_INTERVAL: "30"
+  HEALTH_CHECK_TIMEOUT: "10"
+  
+  # Performance Settings
+  MAX_WORKERS: "4"
+  WORKER_TIMEOUT: "300"
+  
+  # Security Settings
+  CORS_ORIGINS: "https://ai-agent-recruiter.com,https://www.ai-agent-recruiter.com"
+  
+  # Monitoring Configuration
+  PROMETHEUS_METRICS_ENABLED: "true"
+  PROMETHEUS_METRICS_PORT: "9090"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ai-agent-recruiter-config
+  namespace: ai-agent-recruiter-staging
+  labels:
+    app: ai-agent-recruiter
+    component: config
+data:
+  # Database Configuration
+  DATABASE_URL: "postgresql://postgres:password@postgres-service:5432/aiagent_recruiter_staging"
+  
+  # API Configuration
+  API_HOST: "0.0.0.0"
+  API_PORT: "8000"
+  
+  # Job Scraping Configuration
+  SCRAPING_INTERVAL_HOURS: "2"
+  JOB_RELEVANCE_THRESHOLD: "0.6"
+  
+  # Email Configuration
+  EMAIL_HOST: "smtp.gmail.com"
+  EMAIL_PORT: "587"
+  
+  # Geographic Settings
+  TARGET_COUNTRIES: "USA,United States"
+  
+  # Corp-to-Corp Keywords
+  CORP_TO_CORP_KEYWORDS: "corp to corp,c2c,contract,contractor,consulting,1099,w2,independent contractor"
+  
+  # Frontend Configuration
+  REACT_APP_API_BASE_URL: "https://staging-api.ai-agent-recruiter.com/api"
+  
+  # Logging Configuration
+  LOG_LEVEL: "DEBUG"
+  LOG_FORMAT: "json"
+  
+  # Health Check Configuration
+  HEALTH_CHECK_INTERVAL: "30"
+  HEALTH_CHECK_TIMEOUT: "10"
+  
+  # Performance Settings
+  MAX_WORKERS: "2"
+  WORKER_TIMEOUT: "300"
+  
+  # Security Settings
+  CORS_ORIGINS: "https://staging.ai-agent-recruiter.com"
+  
+  # Monitoring Configuration
+  PROMETHEUS_METRICS_ENABLED: "true"
+  PROMETHEUS_METRICS_PORT: "9090"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ai-agent-recruiter-config
+  namespace: ai-agent-recruiter-dev
+  labels:
+    app: ai-agent-recruiter
+    component: config
+data:
+  # Database Configuration
+  DATABASE_URL: "postgresql://postgres:password@postgres-service:5432/aiagent_recruiter_dev"
+  
+  # API Configuration
+  API_HOST: "0.0.0.0"
+  API_PORT: "8000"
+  
+  # Job Scraping Configuration
+  SCRAPING_INTERVAL_HOURS: "4"
+  JOB_RELEVANCE_THRESHOLD: "0.5"
+  
+  # Email Configuration
+  EMAIL_HOST: "smtp.gmail.com"
+  EMAIL_PORT: "587"
+  
+  # Geographic Settings
+  TARGET_COUNTRIES: "USA,United States"
+  
+  # Corp-to-Corp Keywords
+  CORP_TO_CORP_KEYWORDS: "corp to corp,c2c,contract,contractor,consulting,1099,w2,independent contractor"
+  
+  # Frontend Configuration
+  REACT_APP_API_BASE_URL: "https://dev-api.ai-agent-recruiter.com/api"
+  
+  # Logging Configuration
+  LOG_LEVEL: "DEBUG"
+  LOG_FORMAT: "text"
+  
+  # Health Check Configuration
+  HEALTH_CHECK_INTERVAL: "30"
+  HEALTH_CHECK_TIMEOUT: "10"
+  
+  # Performance Settings
+  MAX_WORKERS: "1"
+  WORKER_TIMEOUT: "300"
+  
+  # Security Settings
+  CORS_ORIGINS: "*"
+  
+  # Monitoring Configuration
+  PROMETHEUS_METRICS_ENABLED: "true"
+  PROMETHEUS_METRICS_PORT: "9090"

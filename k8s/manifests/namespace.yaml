@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ai-agent-recruiter
+  labels:
+    app: ai-agent-recruiter
+    environment: production
+    version: v1.0.0
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ai-agent-recruiter-staging
+  labels:
+    app: ai-agent-recruiter
+    environment: staging
+    version: v1.0.0
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ai-agent-recruiter-dev
+  labels:
+    app: ai-agent-recruiter
+    environment: development
+    version: v1.0.0

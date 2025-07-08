@@ -1,0 +1,257 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ai-agent-recruiter-ingress
+  namespace: ai-agent-recruiter
+  labels:
+    app: ai-agent-recruiter
+    component: ingress
+  annotations:
+    # AWS Load Balancer Controller
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/load-balancer-name: ai-agent-recruiter-alb
+    alb.ingress.kubernetes.io/group.name: ai-agent-recruiter
+    
+    # SSL/TLS Configuration
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:123456789012:certificate/your-certificate-arn
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+    
+    # Health Checks
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "30"
+    alb.ingress.kubernetes.io/healthcheck-timeout-seconds: "5"
+    alb.ingress.kubernetes.io/healthy-threshold-count: "2"
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: "2"
+    
+    # Performance and Security
+    alb.ingress.kubernetes.io/load-balancer-attributes: |
+      idle_timeout.timeout_seconds=60,
+      routing.http2.enabled=true,
+      access_logs.s3.enabled=true,
+      access_logs.s3.bucket=ai-agent-recruiter-logs,
+      access_logs.s3.prefix=alb-logs
+    
+    # WAF Protection
+    alb.ingress.kubernetes.io/wafv2-acl-arn: arn:aws:wafv2:us-east-1:123456789012:global/webacl/ai-agent-recruiter-waf/your-waf-id
+    
+    # Rate Limiting
+    nginx.ingress.kubernetes.io/rate-limit-connections: "10"
+    nginx.ingress.kubernetes.io/rate-limit-requests-per-second: "5"
+    
+    # CORS Configuration
+    nginx.ingress.kubernetes.io/cors-allow-origin: "https://ai-agent-recruiter.com"
+    nginx.ingress.kubernetes.io/cors-allow-methods: "GET, POST, PUT, DELETE, OPTIONS"
+    nginx.ingress.kubernetes.io/cors-allow-headers: "DNT,X-CustomHeader,Keep-Alive,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Authorization"
+    
+    # Compression
+    nginx.ingress.kubernetes.io/gzip-enable: "true"
+    nginx.ingress.kubernetes.io/gzip-compression-level: "6"
+    
+    # Security Headers
+    nginx.ingress.kubernetes.io/server-snippet: |
+      add_header X-Frame-Options SAMEORIGIN;
+      add_header X-Content-Type-Options nosniff;
+      add_header X-XSS-Protection "1; mode=block";
+      add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+      add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline';" always;
+spec:
+  tls:
+  - hosts:
+    - ai-agent-recruiter.com
+    - www.ai-agent-recruiter.com
+    - api.ai-agent-recruiter.com
+    secretName: ai-agent-recruiter-tls
+  rules:
+  - host: ai-agent-recruiter.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: ai-agent-recruiter-frontend-service
+            port:
+              number: 3000
+  - host: www.ai-agent-recruiter.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: ai-agent-recruiter-frontend-service
+            port:
+              number: 3000
+  - host: api.ai-agent-recruiter.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: ai-agent-recruiter-backend-service
+            port:
+              number: 8000
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ai-agent-recruiter-ingress
+  namespace: ai-agent-recruiter-staging
+  labels:
+    app: ai-agent-recruiter
+    component: ingress
+  annotations:
+    # AWS Load Balancer Controller
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/load-balancer-name: ai-agent-recruiter-staging-alb
+    alb.ingress.kubernetes.io/group.name: ai-agent-recruiter-staging
+    
+    # SSL/TLS Configuration
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:123456789012:certificate/your-staging-certificate-arn
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+    
+    # Health Checks
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "30"
+    alb.ingress.kubernetes.io/healthcheck-timeout-seconds: "5"
+    alb.ingress.kubernetes.io/healthy-threshold-count: "2"
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: "2"
+    
+    # Performance and Security
+    alb.ingress.kubernetes.io/load-balancer-attributes: |
+      idle_timeout.timeout_seconds=60,
+      routing.http2.enabled=true,
+      access_logs.s3.enabled=true,
+      access_logs.s3.bucket=ai-agent-recruiter-staging-logs,
+      access_logs.s3.prefix=alb-logs
+    
+    # Rate Limiting
+    nginx.ingress.kubernetes.io/rate-limit-connections: "10"
+    nginx.ingress.kubernetes.io/rate-limit-requests-per-second: "5"
+    
+    # CORS Configuration
+    nginx.ingress.kubernetes.io/cors-allow-origin: "https://staging.ai-agent-recruiter.com"
+    nginx.ingress.kubernetes.io/cors-allow-methods: "GET, POST, PUT, DELETE, OPTIONS"
+    nginx.ingress.kubernetes.io/cors-allow-headers: "DNT,X-CustomHeader,Keep-Alive,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Authorization"
+    
+    # Compression
+    nginx.ingress.kubernetes.io/gzip-enable: "true"
+    nginx.ingress.kubernetes.io/gzip-compression-level: "6"
+    
+    # Security Headers
+    nginx.ingress.kubernetes.io/server-snippet: |
+      add_header X-Frame-Options SAMEORIGIN;
+      add_header X-Content-Type-Options nosniff;
+      add_header X-XSS-Protection "1; mode=block";
+      add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+      add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline';" always;
+spec:
+  tls:
+  - hosts:
+    - staging.ai-agent-recruiter.com
+    - staging-api.ai-agent-recruiter.com
+    secretName: ai-agent-recruiter-staging-tls
+  rules:
+  - host: staging.ai-agent-recruiter.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: ai-agent-recruiter-frontend-service
+            port:
+              number: 3000
+  - host: staging-api.ai-agent-recruiter.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: ai-agent-recruiter-backend-service
+            port:
+              number: 8000
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ai-agent-recruiter-ingress
+  namespace: ai-agent-recruiter-dev
+  labels:
+    app: ai-agent-recruiter
+    component: ingress
+  annotations:
+    # AWS Load Balancer Controller
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/load-balancer-name: ai-agent-recruiter-dev-alb
+    alb.ingress.kubernetes.io/group.name: ai-agent-recruiter-dev
+    
+    # SSL/TLS Configuration
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:123456789012:certificate/your-dev-certificate-arn
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+    
+    # Health Checks
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "30"
+    alb.ingress.kubernetes.io/healthcheck-timeout-seconds: "5"
+    alb.ingress.kubernetes.io/healthy-threshold-count: "2"
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: "2"
+    
+    # Performance and Security
+    alb.ingress.kubernetes.io/load-balancer-attributes: |
+      idle_timeout.timeout_seconds=60,
+      routing.http2.enabled=true,
+      access_logs.s3.enabled=true,
+      access_logs.s3.bucket=ai-agent-recruiter-dev-logs,
+      access_logs.s3.prefix=alb-logs
+    
+    # Rate Limiting
+    nginx.ingress.kubernetes.io/rate-limit-connections: "20"
+    nginx.ingress.kubernetes.io/rate-limit-requests-per-second: "10"
+    
+    # CORS Configuration
+    nginx.ingress.kubernetes.io/cors-allow-origin: "*"
+    nginx.ingress.kubernetes.io/cors-allow-methods: "GET, POST, PUT, DELETE, OPTIONS"
+    nginx.ingress.kubernetes.io/cors-allow-headers: "DNT,X-CustomHeader,Keep-Alive,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Authorization"
+    
+    # Compression
+    nginx.ingress.kubernetes.io/gzip-enable: "true"
+    nginx.ingress.kubernetes.io/gzip-compression-level: "6"
+spec:
+  tls:
+  - hosts:
+    - dev.ai-agent-recruiter.com
+    - dev-api.ai-agent-recruiter.com
+    secretName: ai-agent-recruiter-dev-tls
+  rules:
+  - host: dev.ai-agent-recruiter.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: ai-agent-recruiter-frontend-service
+            port:
+              number: 3000
+  - host: dev-api.ai-agent-recruiter.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: ai-agent-recruiter-backend-service
+            port:
+              number: 8000
