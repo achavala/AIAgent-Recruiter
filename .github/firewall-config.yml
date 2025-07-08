@@ -1,0 +1,49 @@
+# Firewall Configuration for GitHub Actions
+# This configuration allows access to Debian repositories to prevent build failures
+
+# Allow access to Debian package repositories
+allow_domains:
+  - deb.debian.org
+  - security.debian.org
+  - archive.debian.org
+  - ftp.debian.org
+  - httpredir.debian.org
+  - cdn-fastly.deb.debian.org
+  - cdn-aws.deb.debian.org
+
+# Allow access to common package repository domains
+allow_patterns:
+  - "*.debian.org"
+  - "*.ubuntu.com"
+  - "*.archive.ubuntu.com"
+  - "*.security.ubuntu.com"
+
+# Allow HTTP and HTTPS traffic to package repositories
+allow_ports:
+  - 80   # HTTP
+  - 443  # HTTPS
+
+# DNS resolution for package repositories
+allow_dns:
+  - "_http._tcp.deb.debian.org"
+  - "_https._tcp.deb.debian.org"
+  - "_http._tcp.security.debian.org"
+  - "_https._tcp.security.debian.org"
+
+# Configuration for different environments
+environments:
+  ci:
+    description: "CI/CD environment package repository access"
+    rules:
+      - action: allow
+        destination: "deb.debian.org"
+        ports: [80, 443]
+        protocol: tcp
+      - action: allow
+        destination: "security.debian.org"  
+        ports: [80, 443]
+        protocol: tcp
+      - action: allow
+        destination: "archive.debian.org"
+        ports: [80, 443]
+        protocol: tcp
