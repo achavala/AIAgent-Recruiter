@@ -80,5 +80,7 @@ frontend/dist/
 # Data files
 data/
 *.csv
-*.json
 *.xlsx
+# Exclude package.json files from the data exclusion
+!package.json
+!package-lock.json
